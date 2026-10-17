@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: levelup-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: levelup-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /var/data/levelup.db
+      - key: CORS_ORIGINS
+        value: https://YOUR-VERCEL-DOMAIN.vercel.app
