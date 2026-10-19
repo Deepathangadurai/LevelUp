@@ -1,4 +1,4 @@
-const CACHE_NAME = "levelup-shell-v29";
+const CACHE_NAME = "levelup-shell-v30";
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -16,9 +16,16 @@ const APP_SHELL_PATHS = new Set(APP_SHELL);
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
-      .then(() => self.skipWaiting()),
+      .then((cache) => cache.addAll(
+        APP_SHELL.map((path) => new Request(path, { cache: "reload" })),
+      )),
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    event.waitUntil(self.skipWaiting());
+  }
 });
 
 self.addEventListener("activate", (event) => {

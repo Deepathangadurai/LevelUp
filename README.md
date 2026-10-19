@@ -12,7 +12,7 @@ LevelUp is a learning-plan tracker where each account can create and manage mult
 - Up to 50 topics per day and up to 50 checklist items per topic.
 - Copy topics and checklist items to multiple days at once while keeping each day name and resetting copied progress.
 - Checklist progress saved to the backend as it changes.
-- Responsive, installable frontend.
+- Responsive, installable frontend with an in-app prompt to apply available updates.
 - FastAPI backend with SQLite storage.
 
 Accounts currently do not have email verification or password reset. Use a unique password and deploy the API over HTTPS. API sessions expire after 30 days.
@@ -44,6 +44,8 @@ python -m http.server 5500
 Open `http://localhost:5500`, create an account, and start a plan. The API is required; there is no shared or device-only account fallback.
 
 The app shell can load from cache when offline, but signing in and reading or saving plans require a connection to the configured API. Install it from the browser's install prompt/menu; the in-app **Install app** button appears in browsers that expose an install prompt.
+
+When a frontend update is deployed, installed apps check for it when opened, brought back into focus, and periodically while open. They show an **Update now** prompt and reload after the user confirms. Increment `CACHE_NAME` in `frontend/sw.js` for each frontend release so the new app shell gets its own cache and the current version remains available until the update is accepted.
 
 ## Deploy
 

@@ -317,6 +317,31 @@
   text-overflow: ellipsis;
 }
 
+.pwa-update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: -10px 0 20px;
+  padding: 12px 15px;
+  border: 1px solid #d5e7bd;
+  border-radius: 12px;
+  background: #f1f8e9;
+  color: #294b32;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pwa-update-banner[hidden] {
+  display: none;
+}
+
+.pwa-update-banner .secondary-btn {
+  flex-shrink: 0;
+  min-height: 34px;
+  padding: 7px 11px;
+}
+
 .header-action-btn {
   position: relative;
   display: inline-grid;
@@ -1007,6 +1032,11 @@
 
   .account-name {
     display: none;
+  }
+
+  .pwa-update-banner {
+    margin: -8px 0 18px;
+    font-size: 12px;
   }
 
   .header-action-btn {

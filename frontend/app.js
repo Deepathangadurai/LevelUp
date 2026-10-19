@@ -12,6 +12,8 @@ let editingPlanId = null;
 let authMode = 'login';
 let expandedDays = new Set();
 let planWriteQueue = Promise.resolve();
+let serviceWorkerRegistration = null;
+let reloadAfterServiceWorkerUpdate = false;
 
 function makeId() {
   return crypto.randomUUID();
@@ -808,7 +810,53 @@ window.addEventListener('appinstalled', () => {
 });
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(error => {
+  const updateBanner = $('#pwa-update-banner');
+  const updateButton = $('#pwa-update-btn');
+  const showUpdateAvailable = registration => {
+    if (!registration.waiting) return;
+    serviceWorkerRegistration = registration;
+    updateBanner.hidden = false;
+  };
+
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloadAfterServiceWorkerUpdate) window.location.reload();
+  });
+  updateButton.addEventListener('click', () => {
+    const waitingWorker = serviceWorkerRegistration?.waiting;
+    if (!waitingWorker) {
+      updateBanner.hidden = true;
+      return;
+    }
+    reloadAfterServiceWorkerUpdate = true;
+    updateButton.disabled = true;
+    updateButton.textContent = 'Updating...';
+    waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+  });
+
+  navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(registration => {
+    serviceWorkerRegistration = registration;
+    showUpdateAvailable(registration);
+    registration.addEventListener('updatefound', () => {
+      const installingWorker = registration.installing;
+      if (!installingWorker) return;
+      installingWorker.addEventListener('statechange', () => {
+        if (installingWorker.state === 'installed' && navigator.serviceWorker.controller) {
+          showUpdateAvailable(registration);
+        }
+      });
+    });
+
+    const checkForUpdates = () => {
+      registration.update().catch(error => {
+        console.error('Service worker update check failed:', error);
+      });
+    };
+    window.addEventListener('focus', checkForUpdates);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') checkForUpdates();
+    });
+    window.setInterval(checkForUpdates, 60 * 60 * 1000);
+  }).catch(error => {
     console.error('Service worker registration failed:', error);
   });
 }
