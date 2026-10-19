@@ -17,6 +17,45 @@ function makeId() {
   return crypto.randomUUID();
 }
 
+function todayDate() {
+  const now = new Date();
+  return [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0')
+  ].join('-');
+}
+
+function planStartDate(plan) {
+  if (plan.start_date) return plan.start_date;
+  if (!plan.created_at) return '';
+  const created = new Date(plan.created_at);
+  if (Number.isNaN(created.getTime())) return '';
+  return [
+    created.getFullYear(),
+    String(created.getMonth() + 1).padStart(2, '0'),
+    String(created.getDate()).padStart(2, '0')
+  ].join('-');
+}
+
+function planDayDate(plan, dayIndex) {
+  const startDate = planStartDate(plan);
+  if (!startDate) return '';
+  const date = new Date(`${startDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + dayIndex);
+  return date.toISOString().slice(0, 10);
+}
+
+function formatDate(dateValue) {
+  if (!dateValue) return 'Start date not set';
+  const [year, month, day] = dateValue.split('-').map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  });
+}
+
 function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({
     '&': '&amp;',
@@ -36,7 +75,18 @@ async function request(path, options = {}) {
   if (!API_BASE) throw new Error('The backend API URL is not configured.');
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(API_BASE + path, { ...options, headers });
+  let response;
+  try {
+    response = await fetch(API_BASE + path, { ...options, headers });
+  } catch (error) {
+    console.error(`API request failed for ${path}:`, error);
+    if (error instanceof TypeError) {
+      throw new Error(
+        'Could not reach LevelUp services. On localhost, check that the API is running on port 8001. On the deployed site, check the Vercel API rewrite and Render service, then try again.'
+      );
+    }
+    throw error;
+  }
   const data = response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok) {
     const message = errorMessage(data?.detail || data?.message || response.statusText);
@@ -146,12 +196,18 @@ function counterControl(label, singular, value, min, max, attributes) {
 function renderDashboard() {
   const grid = $('#plan-grid');
   const totalDays = plans.reduce((sum, plan) => sum + plan.days.length, 0);
-  const stats = plans.reduce((summary, plan) => {
-    const planProgress = planStats(plan);
-    summary.done += planProgress.done;
-    summary.items += planProgress.total;
+  const today = todayDate();
+  const todayProgress = plans.reduce((summary, plan) => {
+    plan.days.forEach((day, index) => {
+      if (planDayDate(plan, index) !== today) return;
+      summary.days += 1;
+      day.topics.forEach(topic => topic.checklist.forEach(item => {
+        summary.total += 1;
+        if (item.is_completed) summary.done += 1;
+      }));
+    });
     return summary;
-  }, { done: 0, items: 0 });
+  }, { days: 0, done: 0, total: 0 });
   const greeting = user?.name ? `Welcome back, ${user.name}` : 'Welcome to LevelUp';
   $('#dashboard-greeting').textContent = greeting;
   $('#dashboard-summary').textContent = plans.length
@@ -159,9 +215,9 @@ function renderDashboard() {
     : 'Create a plan for something you want to learn or achieve.';
   $('#plan-count-label').textContent = `${plans.length} ${plans.length === 1 ? 'plan' : 'plans'}`;
   $('#dashboard-stats').innerHTML = `
-    <article class="dashboard-stat"><span class="stat-icon">▦</span><span class="stat-label">YOUR PLANS</span><strong>${plans.length}</strong><small>Personal goals in progress</small></article>
+    <article class="dashboard-stat"><span class="stat-icon">▦</span><span class="stat-label">YOUR PLANS</span><strong>${plans.length}</strong><small>Plans you're tracking</small></article>
     <article class="dashboard-stat"><span class="stat-icon purple">◷</span><span class="stat-label">PLANNED DAYS</span><strong>${totalDays}</strong><small>Across all your plans</small></article>
-    <article class="dashboard-stat"><span class="stat-icon orange">✓</span><span class="stat-label">CHECKLIST PROGRESS</span><strong>${stats.done}<small class="of-total"> / ${stats.items}</small></strong><small>Items completed</small></article>`;
+    <article class="dashboard-stat"><span class="stat-icon orange">✓</span><span class="stat-label">TODAY'S PROGRESS</span><strong>${todayProgress.done}<small class="of-total"> / ${todayProgress.total}</small></strong><small>${todayProgress.total ? "Today's checklist items completed" : todayProgress.days ? 'No checklist items scheduled today' : 'No plan day scheduled today'}</small></article>`;
   if (!plans.length) {
     grid.innerHTML = `<div class="empty-state dashboard-empty"><span class="empty-icon">✳</span><strong>Your next goal starts here</strong><span>Create a plan, choose its structure, and track progress one checklist at a time.</span><button class="primary-btn" data-create-plan>Create your first plan <span>+</span></button></div>`;
     return;
@@ -169,10 +225,12 @@ function renderDashboard() {
   grid.innerHTML = plans.map(plan => {
     const stats = planStats(plan);
     const topicCount = plan.days.reduce((sum, day) => sum + day.topics.length, 0);
+    const isComplete = stats.total > 0 && stats.done === stats.total;
     return `<article class="plan-card">
-      <div class="plan-card-top"><span class="category-symbol">▦</span><span class="plan-percent">${stats.percent}%</span></div>
+      <div class="plan-card-top"><span class="category-symbol">▦</span><span class="plan-card-status ${isComplete ? 'complete' : ''}">${isComplete ? 'Complete' : 'In progress'}</span></div>
       <h3>${escapeHTML(plan.name)}</h3>
-      <p>${plan.days.length} days · ${topicCount} topics · ${stats.done}/${stats.total} checklist items</p>
+      <p>${plan.days.length} days · ${topicCount} topics · starts ${escapeHTML(formatDate(planStartDate(plan)))} · ${stats.done}/${stats.total} items</p>
+      <span class="plan-percent">${stats.percent}% complete</span>
       <div class="progress-track"><div class="progress-fill" style="width:${stats.percent}%"></div></div>
       <button class="secondary-btn" data-open-plan="${escapeHTML(plan.id)}">Open plan</button>
     </article>`;
@@ -199,6 +257,7 @@ function renderPlanDetail() {
       </div>
       <span class="eyebrow">${plan.days.length} DAYS · ${stats.done}/${stats.total} CHECKLIST ITEMS COMPLETE</span>
       <h2>${escapeHTML(plan.name)}</h2>
+      <p class="muted">Starts ${escapeHTML(formatDate(planStartDate(plan)))} · ${stats.total > 0 && stats.done === stats.total ? 'Plan complete' : 'Plan in progress'}</p>
       <div class="progress-track"><div class="progress-fill" style="width:${stats.percent}%"></div></div>
       <p class="muted">${stats.percent}% complete</p>
     </div>
@@ -209,7 +268,7 @@ function renderPlanDetail() {
       return `<article class="user-day-card ${isOpen ? 'open' : ''}">
         <button class="user-day-toggle" data-toggle-day="${escapeHTML(day.id)}" aria-expanded="${isOpen}">
           <span class="day-number">${String(index + 1).padStart(2, '0')}</span>
-          <span class="day-title-wrap"><strong>${escapeHTML(day.title)}</strong><small>${day.topics.length} topics</small></span>
+          <span class="day-title-wrap"><strong>${escapeHTML(day.title)}</strong><small>${day.topics.length} topics · ${escapeHTML(formatDate(planDayDate(plan, index)))}</small></span>
           <span class="day-progress"><small>${complete}/${checklist.length} done</small></span>
           <span class="chevron">›</span>
         </button>
@@ -230,6 +289,7 @@ function renderPlanDetail() {
 function renderBuilder() {
   if (!draft) return;
   $('#builder-name').value = draft.name;
+  $('#builder-start-date').value = draft.start_date;
   $('#builder-day-count').value = draft.days.length;
   $('#builder-days').innerHTML = draft.days.map((day, dayIndex) => `
     <article class="builder-day">
@@ -237,6 +297,10 @@ function renderBuilder() {
         <label>Day name<input maxlength="120" required data-day-title="${escapeHTML(day.id)}" value="${escapeHTML(day.title)}"></label>
         ${counterControl('Topics in this day', 'topic', day.topics.length, 0, 50, { 'data-topic-count': day.id })}
       </div>
+      ${draft.days.length > 1 ? `<details class="builder-day-copy" data-copy-day="${escapeHTML(day.id)}">
+        <summary><span class="copy-icon" aria-hidden="true">↗</span><span>Copy to other days</span></summary>
+        <div class="builder-copy-panel"></div>
+      </details>` : ''}
       <div class="builder-topic-list">${day.topics.map((topic, topicIndex) => `
         <section class="builder-topic">
           <div class="builder-topic-head"><h3>Topic ${topicIndex + 1}</h3>
@@ -252,11 +316,88 @@ function renderBuilder() {
   `).join('');
 }
 
+function copyDayContent(sourceDayId, targetDayIds) {
+  const sourceDay = draft.days.find(day => day.id === sourceDayId);
+  const targetDays = targetDayIds
+    .map(id => draft.days.find(day => day.id === id))
+    .filter(day => day && day !== sourceDay);
+  if (!sourceDay || !targetDays.length) return;
+
+  const daysWithContent = targetDays.filter(day =>
+    day.topics.length > 1 || day.topics.some(topic =>
+      topic.title.trim()
+      || topic.checklist.length > 1
+      || topic.checklist.some(item => item.title.trim())
+    )
+  );
+  if (daysWithContent.length && !window.confirm(
+    `Replace existing topics in ${daysWithContent.map(day => day.title).join(', ')}? Their day names will stay the same and copied checklist items will start unchecked.`
+  )) return;
+
+  const currentChecklistCount = draft.days.reduce(
+    (total, day) => total + day.topics.reduce((dayTotal, topic) => dayTotal + topic.checklist.length, 0),
+    0
+  );
+  const targetChecklistCount = targetDays.reduce((total, day) =>
+    total + day.topics.reduce((dayTotal, topic) => dayTotal + topic.checklist.length, 0), 0
+  );
+  const sourceChecklistCount = sourceDay.topics.reduce(
+    (total, topic) => total + topic.checklist.length,
+    0
+  );
+  if (currentChecklistCount - targetChecklistCount + sourceChecklistCount * targetDays.length > 10000) {
+    $('#editor-error').textContent = 'Copying this day would exceed the plan limit of 10,000 checklist items.';
+    renderBuilder();
+    return;
+  }
+
+  targetDays.forEach(targetDay => {
+    targetDay.topics = sourceDay.topics.map(topic => ({
+      id: makeId(),
+      title: topic.title,
+      checklist: topic.checklist.map(item => ({
+        id: makeId(),
+        title: item.title,
+        is_completed: false
+      }))
+    }));
+  });
+  $('#editor-error').textContent = '';
+  renderBuilder();
+  toast(`Copied ${sourceDay.title} to ${targetDays.length} ${targetDays.length === 1 ? 'day' : 'days'}`);
+}
+
+function renderDayCopyTargets(details) {
+  const sourceDayId = details.dataset.copyDay;
+  const panel = details.querySelector('.builder-copy-panel');
+  const targets = draft.days
+    .map((day, index) => ({ day, index }))
+    .filter(({ day }) => day.id !== sourceDayId);
+
+  panel.innerHTML = `
+    <p class="copy-panel-hint">Choose one or more days to reuse these topics and checklist items.</p>
+    <div class="copy-target-list">
+      ${targets.map(({ day, index }) => `
+        <label class="copy-target">
+          <input type="checkbox" value="${escapeHTML(day.id)}" data-copy-target>
+          <span>Day ${index + 1}</span>
+        </label>
+      `).join('')}
+    </div>
+    <div class="copy-panel-footer">
+      <span class="copy-panel-note">Day names stay the same; copied checklists start fresh.</span>
+      <button class="primary-btn" type="button" data-copy-source-day="${escapeHTML(sourceDayId)}" disabled>Copy to selected</button>
+    </div>
+  `;
+  details.dataset.copyReady = 'true';
+}
+
 function beginPlanEditor(plan = null) {
   editingPlanId = plan?.id || null;
   draft = plan
     ? JSON.parse(JSON.stringify(plan))
-    : { name: '', days: Array.from({ length: 7 }, (_, index) => newDay(index)) };
+    : { name: '', start_date: todayDate(), days: Array.from({ length: 7 }, (_, index) => newDay(index)) };
+  draft.start_date ||= planStartDate(plan) || todayDate();
   $('#editor-heading').textContent = plan ? 'Edit plan' : 'Create a plan';
   $('#editor-error').textContent = '';
   renderBuilder();
@@ -314,6 +455,8 @@ function updateChecklistCount(dayId, topicId, count) {
 function validateDraft() {
   draft.name = $('#builder-name').value.trim();
   if (!draft.name) return 'Enter a name for this plan.';
+  draft.start_date = $('#builder-start-date').value;
+  if (!draft.start_date) return 'Choose a start date for this plan.';
   for (let dayIndex = 0; dayIndex < draft.days.length; dayIndex += 1) {
     const day = draft.days[dayIndex];
     day.title = day.title.trim() || `Day ${dayIndex + 1}`;
@@ -344,7 +487,7 @@ async function savePlan(event) {
     const path = editingPlanId ? `/api/plans/${encodeURIComponent(editingPlanId)}` : '/api/plans';
     const plan = await request(path, {
       method: editingPlanId ? 'PUT' : 'POST',
-      body: JSON.stringify({ name: draft.name, days: draft.days })
+      body: JSON.stringify({ name: draft.name, start_date: draft.start_date, days: draft.days })
     });
     const index = plans.findIndex(item => item.id === plan.id);
     if (index === -1) plans.unshift(plan);
@@ -373,7 +516,7 @@ async function toggleChecklist(target) {
   const openDays = new Set(expandedDays);
   renderPlanDetail();
   try {
-    const body = JSON.stringify({ name: plan.name, days: plan.days });
+    const body = JSON.stringify({ name: plan.name, start_date: plan.start_date, days: plan.days });
     const write = planWriteQueue.then(() => request(
       `/api/plans/${encodeURIComponent(plan.id)}`,
       { method: 'PUT', body }
@@ -416,6 +559,8 @@ async function authenticate(event) {
   event.preventDefault();
   const button = $('#auth-submit');
   button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  button.textContent = 'Connecting...';
   $('#auth-error').textContent = '';
   try {
     const path = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
@@ -436,7 +581,9 @@ async function authenticate(event) {
   } catch (error) {
     $('#auth-error').textContent = error.message;
   } finally {
+    button.removeAttribute('aria-busy');
     button.disabled = !API_BASE;
+    button.textContent = authMode === 'login' ? 'Sign in' : 'Create account';
   }
 }
 
@@ -454,11 +601,7 @@ async function restoreSession() {
     await loadPlans();
     showApp();
   } catch (error) {
-    if (token) {
-      token = '';
-      localStorage.removeItem(TOKEN_KEY);
-      showAuth(error.message);
-    }
+    showAuth(error.message);
   }
 }
 
@@ -545,7 +688,11 @@ $('#builder-days').addEventListener('input', event => {
 });
 $('#builder-days').addEventListener('change', event => {
   const element = event.target;
-  if (element.matches('[data-topic-count]')) {
+  if (element.matches('[data-copy-target]')) {
+    const details = element.closest('[data-copy-day]');
+    const button = details?.querySelector('[data-copy-source-day]');
+    if (button) button.disabled = !details.querySelector('[data-copy-target]:checked');
+  } else if (element.matches('[data-topic-count]')) {
     updateTopicCount(element.dataset.topicCount, element.value);
   } else if (element.matches('[data-checklist-count]')) {
     updateChecklistCount(
@@ -554,6 +701,30 @@ $('#builder-days').addEventListener('change', event => {
       element.value
     );
   }
+});
+$('#builder-days').addEventListener('toggle', event => {
+  const details = event.target;
+  if (!details.matches('[data-copy-day]')) return;
+  if (details.open) {
+    $('#builder-days').querySelectorAll('[data-copy-day][open]').forEach(other => {
+      if (other === details) return;
+      other.open = false;
+      other.querySelector('.builder-copy-panel').replaceChildren();
+      delete other.dataset.copyReady;
+    });
+    if (!details.dataset.copyReady) renderDayCopyTargets(details);
+  } else {
+    details.querySelector('.builder-copy-panel').replaceChildren();
+    delete details.dataset.copyReady;
+  }
+}, true);
+$('#builder-days').addEventListener('click', event => {
+  const button = event.target.closest('[data-copy-source-day]');
+  if (!button || button.disabled) return;
+  const details = button.closest('[data-copy-day]');
+  const targetIds = [...details.querySelectorAll('[data-copy-target]:checked')]
+    .map(input => input.value);
+  copyDayContent(button.dataset.copySourceDay, targetIds);
 });
 function handleCountStep(event) {
   const button = event.target.closest('[data-step]');
@@ -591,6 +762,9 @@ $('#builder-days').addEventListener('click', handleCountStep);
 $('#plan-editor-form').addEventListener('submit', savePlan);
 $('#builder-name').addEventListener('input', event => {
   if (draft) draft.name = event.target.value;
+});
+$('#builder-start-date').addEventListener('input', event => {
+  if (draft) draft.start_date = event.target.value;
 });
 $('#builder-day-count').addEventListener('change', event => resizeDays(event.target.value));
 $('#cancel-editor-btn').addEventListener('click', () => {

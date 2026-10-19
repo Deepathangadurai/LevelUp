@@ -11,5 +11,3 @@ services:
     envVars:
       - key: DATABASE_PATH
         value: /var/data/levelup.db
-      - key: CORS_ORIGINS
-        value: https://YOUR-VERCEL-DOMAIN.vercel.app

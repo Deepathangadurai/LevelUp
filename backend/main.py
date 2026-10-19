@@ -5,7 +5,7 @@ import re
 import secrets
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,7 +20,12 @@ SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 PASSWORD_ITERATIONS = 310_000
 
 app = FastAPI(title="LevelUp API", version="2.0.0")
-origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "*").split(",") if x.strip()]
+default_origins = "http://localhost:5500,http://127.0.0.1:5500"
+origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", default_origins).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -65,10 +70,14 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 days_json TEXT NOT NULL,
+                start_date TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )"""
         )
+        plan_columns = {row["name"] for row in con.execute("PRAGMA table_info(plans)")}
+        if "start_date" not in plan_columns:
+            con.execute("ALTER TABLE plans ADD COLUMN start_date TEXT NOT NULL DEFAULT ''")
         con.execute("CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)")
         con.execute("CREATE INDEX IF NOT EXISTS plans_user_idx ON plans(user_id)")
 
@@ -175,6 +184,7 @@ class PlanDay(BaseModel):
 class PlanIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=100)
+    start_date: date
     days: list[PlanDay] = Field(min_length=1, max_length=365)
 
     @model_validator(mode="after")
@@ -199,6 +209,7 @@ def serialized_plan(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "name": row["name"],
+        "start_date": row["start_date"],
         "days": json.loads(row["days_json"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -258,7 +269,7 @@ def logout(authorization: str | None = Header(default=None)) -> dict[str, bool]:
 def list_plans(user: dict[str, Any] = Depends(authenticated_user)) -> list[dict[str, Any]]:
     with connect() as con:
         rows = con.execute(
-            "SELECT id,name,days_json,created_at,updated_at FROM plans WHERE user_id=? ORDER BY created_at DESC",
+            "SELECT id,name,start_date,days_json,created_at,updated_at FROM plans WHERE user_id=? ORDER BY created_at DESC",
             (user["id"],),
         ).fetchall()
     return [serialized_plan(row) for row in rows]
@@ -272,18 +283,19 @@ def create_plan(
     now = now_iso()
     with connect() as con:
         con.execute(
-            "INSERT INTO plans(id,user_id,name,days_json,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO plans(id,user_id,name,start_date,days_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             (
                 plan_id,
                 user["id"],
                 body.name,
+                body.start_date.isoformat(),
                 json.dumps([day.model_dump(mode="json") for day in body.days]),
                 now,
                 now,
             ),
         )
         row = con.execute(
-            "SELECT id,name,days_json,created_at,updated_at FROM plans WHERE id=? AND user_id=?",
+            "SELECT id,name,start_date,days_json,created_at,updated_at FROM plans WHERE id=? AND user_id=?",
             (plan_id, user["id"]),
         ).fetchone()
     return serialized_plan(row)
@@ -296,9 +308,10 @@ def update_plan(
     now = now_iso()
     with connect() as con:
         cur = con.execute(
-            "UPDATE plans SET name=?,days_json=?,updated_at=? WHERE id=? AND user_id=?",
+            "UPDATE plans SET name=?,start_date=?,days_json=?,updated_at=? WHERE id=? AND user_id=?",
             (
                 body.name,
+                body.start_date.isoformat(),
                 json.dumps([day.model_dump(mode="json") for day in body.days]),
                 now,
                 plan_id,
@@ -308,7 +321,7 @@ def update_plan(
         if not cur.rowcount:
             raise HTTPException(status_code=404, detail="Plan not found")
         row = con.execute(
-            "SELECT id,name,days_json,created_at,updated_at FROM plans WHERE id=? AND user_id=?",
+            "SELECT id,name,start_date,days_json,created_at,updated_at FROM plans WHERE id=? AND user_id=?",
             (plan_id, user["id"]),
         ).fetchone()
     return serialized_plan(row)

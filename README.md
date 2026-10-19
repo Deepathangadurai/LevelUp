@@ -7,7 +7,10 @@ LevelUp is a learning-plan tracker where each account can create and manage mult
 - Account registration with a display name, email/password sign-in, and sign-out.
 - Private plan records scoped to the signed-in account.
 - Multiple plans per account, each with 1-365 days.
+- A start date for each plan, with sequential calendar dates shown for each plan day; older plans without a saved date use their local creation date.
+- Dashboard tracking for today's scheduled checklist progress and each plan's completion status (complete when every checklist item is checked).
 - Up to 50 topics per day and up to 50 checklist items per topic.
+- Copy topics and checklist items to multiple days at once while keeping each day name and resetting copied progress.
 - Checklist progress saved to the backend as it changes.
 - Responsive, installable frontend.
 - FastAPI backend with SQLite storage.
@@ -26,12 +29,12 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate
 # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --host 127.0.0.1 --port 8001
 ```
 
 ### 2. Configure and serve the frontend
 
-When opened on localhost, `frontend/config.js` automatically connects to `http://127.0.0.1:8000`. Configure the backend process `CORS_ORIGINS` environment variable to include the frontend origin (`http://localhost:5500` and `http://127.0.0.1:5500`); see `backend/.env.example` for the values.
+When opened on localhost, `frontend/config.js` automatically connects to `http://127.0.0.1:8001`. Configure the backend process `CORS_ORIGINS` environment variable to include the frontend origin (`http://localhost:5500` and `http://127.0.0.1:5500`); see `backend/.env.example` for the values.
 
 ```bash
 cd frontend
@@ -47,8 +50,8 @@ The app shell can load from cache when offline, but signing in and reading or sa
 ### Frontend to Vercel
 
 1. Import the repository into Vercel and set **Root Directory** to `frontend`.
-2. Set `API_BASE_URL` in `frontend/config.js` to the deployed API origin. The empty non-local default does not connect to an API.
-3. Deploy the frontend over HTTPS.
+2. `frontend/vercel.json` proxies `/api/*` requests to the Render API, so the browser uses the Vercel origin and does not depend on a manually configured production CORS origin.
+3. Deploy the frontend over HTTPS. Keep the API destination in `frontend/vercel.json` in sync with your Render service URL.
 
 ### API to Render
 
@@ -56,8 +59,9 @@ The app shell can load from cache when offline, but signing in and reading or sa
 2. Build command: `pip install -r requirements.txt`.
 3. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`.
 4. Attach a persistent disk at `/var/data` and set `DATABASE_PATH=/var/data/levelup.db`.
-5. Set `CORS_ORIGINS` to the exact HTTPS frontend origin.
-6. Deploy and check `/api/health`.
+5. Deploy and check `/api/health` on the Render service. The frontend's `/api/health` URL should also return the API health response through the Vercel proxy.
+
+For local development, start the API from the `backend` directory and serve the frontend from the `frontend` directory as shown above. The API allows the two local frontend origins by default. If you change the frontend origin, update `CORS_ORIGINS` for the local API process to include that exact origin.
 
 ## API
 
