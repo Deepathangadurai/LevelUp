@@ -1,5 +1,9 @@
 const API_BASE = (window.LEVELUP_CONFIG?.API_BASE_URL || '').replace(/\/$/, '');
 const TOKEN_KEY = 'levelup-session';
+const CACHE_KEY = 'levelup-cache-v1';
+const RETRY_STATUSES = new Set([502, 503, 504]);
+const MAX_ATTEMPTS = 8;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 
@@ -14,6 +18,20 @@ let expandedDays = new Set();
 let planWriteQueue = Promise.resolve();
 let serviceWorkerRegistration = null;
 let reloadAfterServiceWorkerUpdate = false;
+let pendingWrites = 0;
+
+// Wake the (free-tier) backend immediately while the page is still loading.
+if (API_BASE) fetch(`${API_BASE}/api/health`, { cache: 'no-store' }).catch(() => {});
+
+function saveCache() {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ user, plans })); } catch (error) { /* storage full/blocked */ }
+}
+function readCache() {
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (error) { return null; }
+}
+function clearCache() {
+  try { localStorage.removeItem(CACHE_KEY); } catch (error) { /* ignore */ }
+}
 
 function makeId() {
   return crypto.randomUUID();
@@ -73,21 +91,40 @@ function errorMessage(error) {
   return String(error || 'Request failed');
 }
 
+async function fetchWithTimeout(url, options, ms = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function request(path, options = {}) {
   if (!API_BASE) throw new Error('The backend API URL is not configured.');
+  const method = (options.method || 'GET').toUpperCase();
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
-  let response;
-  try {
-    response = await fetch(API_BASE + path, { ...options, headers });
-  } catch (error) {
-    console.error(`API request failed for ${path}:`, error);
-    if (error instanceof TypeError) {
-      throw new Error(
-        'Could not reach LevelUp services. On localhost, check that the API is running on port 8001. On the deployed site, check the Vercel API rewrite and Render service, then try again.'
-      );
+  // Creating things (POST) is not retried after a network error to avoid duplicates.
+  const retryNetwork = method !== 'POST' || path.startsWith('/api/auth/login');
+  let response = null;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      response = await fetchWithTimeout(API_BASE + path, { ...options, headers });
+    } catch (error) {
+      response = null;
     }
-    throw error;
+    const gatewayDown = response && RETRY_STATUSES.has(response.status);
+    const networkDown = !response && retryNetwork;
+    if (!gatewayDown && !networkDown) break;
+    if (attempt < MAX_ATTEMPTS - 1) {
+      if (attempt === 1) toast('Waking up the server - this can take up to a minute...');
+      await sleep(3000);
+    }
+  }
+  if (!response) {
+    throw new Error('Could not reach LevelUp services. Check your internet connection and try again.');
   }
   const data = response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok) {
@@ -96,6 +133,7 @@ async function request(path, options = {}) {
       token = '';
       user = null;
       localStorage.removeItem(TOKEN_KEY);
+      clearCache();
       showAuth(message);
     }
     throw new Error(message);
@@ -496,6 +534,7 @@ async function savePlan(event) {
     else plans[index] = plan;
     selectedPlanId = plan.id;
     expandedDays = new Set();
+    saveCache();
     renderDashboard();
     renderPlanDetail();
     showPage('plans');
@@ -514,27 +553,33 @@ async function toggleChecklist(target) {
   const item = topic?.checklist.find(value => value.id === target.dataset.checklistId);
   if (!plan || !item) return;
   const previousValue = item.is_completed;
-  item.is_completed = target.checked;
+  const newValue = target.checked;
+  item.is_completed = newValue;
   const openDays = new Set(expandedDays);
   renderPlanDetail();
+  renderDashboard();
+  saveCache();
+  // Only the single changed item is sent (tiny request) instead of the whole plan.
+  const body = JSON.stringify({
+    day_id: day.id, topic_id: topic.id, item_id: item.id, is_completed: newValue
+  });
+  pendingWrites++;
+  const write = planWriteQueue.then(() => request(
+    `/api/plans/${encodeURIComponent(plan.id)}/check`,
+    { method: 'PATCH', body }
+  ));
+  planWriteQueue = write.catch(() => {});
   try {
-    const body = JSON.stringify({ name: plan.name, start_date: plan.start_date, days: plan.days });
-    const write = planWriteQueue.then(() => request(
-      `/api/plans/${encodeURIComponent(plan.id)}`,
-      { method: 'PUT', body }
-    ));
-    planWriteQueue = write.catch(() => {});
-    const saved = await write;
-    const index = plans.findIndex(value => value.id === saved.id);
-    if (index !== -1) plans[index] = saved;
-    renderDashboard();
-    expandedDays = openDays;
-    renderPlanDetail();
+    await write;
   } catch (error) {
     item.is_completed = previousValue;
     expandedDays = openDays;
     renderPlanDetail();
+    renderDashboard();
+    saveCache();
     toast(`Progress was not saved: ${error.message}`);
+  } finally {
+    pendingWrites--;
   }
 }
 
@@ -544,6 +589,7 @@ async function deletePlan(planId) {
     await request(`/api/plans/${encodeURIComponent(planId)}`, { method: 'DELETE' });
     plans = plans.filter(plan => plan.id !== planId);
     selectedPlanId = null;
+    saveCache();
     renderDashboard();
     showPage('home');
     toast('Plan deleted');
@@ -554,6 +600,7 @@ async function deletePlan(planId) {
 
 async function loadPlans() {
   plans = await request('/api/plans');
+  saveCache();
   renderDashboard();
 }
 
@@ -589,13 +636,35 @@ async function authenticate(event) {
   }
 }
 
+async function refreshInBackground() {
+  try {
+    const freshUser = await request('/api/auth/me');
+    const freshPlans = await request('/api/plans');
+    if (pendingWrites > 0 || !token) return; // don't overwrite unsaved ticks
+    user = freshUser;
+    plans = freshPlans;
+    saveCache();
+    $('#account-name').textContent = user.name || 'Learner';
+    renderDashboard();
+    if (selectedPlanId) renderPlanDetail();
+  } catch (error) {
+    // 401 is already handled in request(); for network errors keep showing saved data.
+    if (token) toast('Offline or server busy - showing your last saved data.');
+  }
+}
+
 async function restoreSession() {
-  if (!API_BASE) {
+  if (!API_BASE || !token) {
     showAuth();
     return;
   }
-  if (!token) {
-    showAuth();
+  // Open instantly from the saved copy, then refresh from the server in the background.
+  const cached = readCache();
+  if (cached?.user && Array.isArray(cached.plans)) {
+    user = cached.user;
+    plans = cached.plans;
+    showApp();
+    refreshInBackground();
     return;
   }
   try {
@@ -603,7 +672,7 @@ async function restoreSession() {
     await loadPlans();
     showApp();
   } catch (error) {
-    showAuth(error.message);
+    if (token) showAuth(error.message);
   }
 }
 
@@ -631,6 +700,7 @@ $('#logout-btn').addEventListener('click', async () => {
   user = null;
   plans = [];
   localStorage.removeItem(TOKEN_KEY);
+  clearCache();
   authMode = 'login';
   showAuth();
   toast(message);
