@@ -23,19 +23,24 @@ DB_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "levelup.db"))
 # Set DATABASE_URL (e.g. a free Neon / Supabase Postgres URL) in production.
 # Without it the app falls back to a local SQLite file, which is WIPED on
 # Render's free plan every time the service restarts or redeploys.
-# Tolerate common copy/paste mistakes: quotes, spaces, or a leading "psql ".
-_match = re.search(r"postgres(?:ql)?://[^\s'\"]+", os.getenv("DATABASE_URL", ""))
-DATABASE_URL = _match.group(0) if _match else ""
+#
+# Robust parsing: strip surrounding whitespace and quotes that can appear
+# when copy-pasting from terminals or .env files.  We do NOT use a regex
+# here because it was silently failing on Neon URLs that contain query-string
+# parameters like "channel_binding=require", causing USE_PG=False and all
+# user data to be lost on every Render restart.
+_raw_db_url = os.getenv("DATABASE_URL", "").strip().strip("'\"")
+DATABASE_URL = _raw_db_url if _raw_db_url.startswith(("postgres://", "postgresql://")) else ""
 USE_PG = bool(DATABASE_URL)
 if not USE_PG:
     try:
         Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         DB_PATH = str(BASE_DIR / "levelup.db")  # e.g. /var/data missing on free plan
-    print("WARNING: DATABASE_URL not set -> using SQLite at", DB_PATH,
-          "(data is LOST on every restart on Render free)", flush=True)
+    print("WARNING: DATABASE_URL not set or invalid -> falling back to SQLite at",
+          DB_PATH, "(data is LOST on every restart on Render free)", flush=True)
 else:
-    print("Database: PostgreSQL", flush=True)
+    print("Database: PostgreSQL (Neon)", flush=True)
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 90
 PASSWORD_ITERATIONS = 310_000
 AUTH_CACHE_SECONDS = 30
