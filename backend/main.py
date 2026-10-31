@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import urllib.request
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -67,9 +68,13 @@ if USE_PG:
         DATABASE_URL,
         min_size=1,
         max_size=5,
-        max_idle=240,
-        max_lifetime=1800,
+        # Neon's free tier suspends after 5 minutes of inactivity, which
+        # causes the pooled connections to go stale. Lower max_idle so the
+        # pool closes unused connections before Neon suspends them.
+        max_idle=180,      # discard idle connections after 3 min
+        max_lifetime=600,  # recycle every 10 min regardless
         timeout=30,
+        reconnect_failed=None,  # keep retrying on transient failures
         check=ConnectionPool.check_connection,
         kwargs={"row_factory": dict_row, "prepare_threshold": None},
         open=False,
@@ -159,6 +164,41 @@ def init_db() -> None:
 
 
 init_db()
+
+
+# ---------------------------------------------------------------------------
+# Keep-alive background thread
+# ---------------------------------------------------------------------------
+# Render's free tier spins the instance down after ~15 minutes of inactivity,
+# causing the next request to wait 50+ seconds while the dyno restarts. This
+# thread pings the health endpoint every 10 minutes so the instance stays warm.
+# It also keeps the Neon DB connection pool fresh so stale connections are
+# recycled before they cause "connection closed" errors.
+_SELF_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+
+
+def _keep_alive() -> None:
+    """Ping our own /api/health every 10 minutes to prevent cold starts."""
+    while True:
+        time.sleep(600)  # 10 minutes
+        try:
+            if _SELF_URL:
+                req = urllib.request.Request(
+                    f"{_SELF_URL}/api/health",
+                    headers={"User-Agent": "LevelUp-KeepAlive/1.0"},
+                )
+                urllib.request.urlopen(req, timeout=15)
+            # Also keep the DB pool warm when using Postgres
+            if USE_PG:
+                with pool.connection() as con:
+                    con.execute("SELECT 1")
+        except Exception:
+            pass  # never crash the keep-alive thread
+
+
+_ka_thread = threading.Thread(target=_keep_alive, daemon=True, name="keep-alive")
+_ka_thread.start()
+# ---------------------------------------------------------------------------
 
 
 def now_iso() -> str:

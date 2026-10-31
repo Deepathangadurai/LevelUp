@@ -3,6 +3,8 @@ const TOKEN_KEY = 'levelup-session';
 const CACHE_KEY = 'levelup-cache-v1';
 const RETRY_STATUSES = new Set([502, 503, 504]);
 const MAX_ATTEMPTS = 8;
+const AUTH_TIMEOUT_MS = 70000;   // 70 s — Render free tier can take 50+ s to wake
+const DEFAULT_TIMEOUT_MS = 25000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -21,7 +23,12 @@ let reloadAfterServiceWorkerUpdate = false;
 let pendingWrites = 0;
 
 // Wake the (free-tier) backend immediately while the page is still loading.
+// This ping runs in parallel so the server is already warming up by the time
+// the user clicks "Sign in", dramatically reducing the cold-start wait time.
 if (API_BASE) fetch(`${API_BASE}/api/health`, { cache: 'no-store' }).catch(() => {});
+
+// Tracks whether we already showed the "waking up" toast so we don't spam it.
+let _wakeToastShown = false;
 
 function saveCache() {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ user, plans })); } catch (error) { /* storage full/blocked */ }
@@ -91,7 +98,7 @@ function errorMessage(error) {
   return String(error || 'Request failed');
 }
 
-async function fetchWithTimeout(url, options, ms = 25000) {
+async function fetchWithTimeout(url, options, ms = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
@@ -104,6 +111,10 @@ async function fetchWithTimeout(url, options, ms = 25000) {
 async function request(path, options = {}) {
   if (!API_BASE) throw new Error('The backend API URL is not configured.');
   const method = (options.method || 'GET').toUpperCase();
+  const isAuthCall = path.startsWith('/api/auth/login') || path.startsWith('/api/auth/me');
+  // Use a longer timeout for auth calls because the free Render backend can
+  // take 50+ seconds to cold-start. For other endpoints 25 s is plenty.
+  const timeoutMs = isAuthCall ? AUTH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
   // Creating things (POST) is not retried after a network error to avoid duplicates.
@@ -111,7 +122,7 @@ async function request(path, options = {}) {
   let response = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      response = await fetchWithTimeout(API_BASE + path, { ...options, headers });
+      response = await fetchWithTimeout(API_BASE + path, { ...options, headers }, timeoutMs);
     } catch (error) {
       response = null;
     }
@@ -119,10 +130,15 @@ async function request(path, options = {}) {
     const networkDown = !response && retryNetwork;
     if (!gatewayDown && !networkDown) break;
     if (attempt < MAX_ATTEMPTS - 1) {
-      if (attempt === 1) toast('Waking up the server - this can take up to a minute...');
+      if (attempt === 1 && !_wakeToastShown) {
+        _wakeToastShown = true;
+        toast('Waking up the server — this can take up to a minute on first load...');
+      }
       await sleep(3000);
     }
   }
+  // Reset wake toast flag after each complete request chain
+  _wakeToastShown = false;
   if (!response) {
     throw new Error('Could not reach LevelUp services. Check your internet connection and try again.');
   }
@@ -609,8 +625,25 @@ async function authenticate(event) {
   const button = $('#auth-submit');
   button.disabled = true;
   button.setAttribute('aria-busy', 'true');
-  button.textContent = 'Connecting...';
   $('#auth-error').textContent = '';
+
+  // If the server might be cold (free Render tier), ping /api/health first so
+  // the user sees a friendly status message and the 70-second budget is used
+  // for the actual login rather than waiting in silence.
+  if (API_BASE) {
+    button.textContent = 'Connecting to server...';
+    try {
+      // Fire a quick health-check. If it resolves fast the server was already
+      // warm. If it times out we still proceed — the login call itself will
+      // retry with the full AUTH_TIMEOUT_MS budget.
+      await Promise.race([
+        fetch(`${API_BASE}/api/health`, { cache: 'no-store' }),
+        sleep(5000) // don't block more than 5 s on pre-ping
+      ]);
+    } catch (_) { /* ignore — login call will handle it */ }
+  }
+
+  button.textContent = authMode === 'login' ? 'Signing in...' : 'Creating account...';
   try {
     const path = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
     const credentials = {
@@ -628,6 +661,8 @@ async function authenticate(event) {
     await loadPlans();
     showApp();
   } catch (error) {
+    // Only show "incorrect password" style errors when the server actually
+    // responded with 401. A network/timeout error shows a clearer message.
     $('#auth-error').textContent = error.message;
   } finally {
     button.removeAttribute('aria-busy');
@@ -659,6 +694,7 @@ async function restoreSession() {
     return;
   }
   // Open instantly from the saved copy, then refresh from the server in the background.
+  // This makes the PWA feel instant even when the server is cold.
   const cached = readCache();
   if (cached?.user && Array.isArray(cached.plans)) {
     user = cached.user;
@@ -667,12 +703,31 @@ async function restoreSession() {
     refreshInBackground();
     return;
   }
+  // No cached data — must hit the network. The server may be cold-starting,
+  // so we use the generous AUTH_TIMEOUT_MS budget via the request() function
+  // and do NOT show the auth screen just because of a network error. Instead
+  // we show a toast and let the user stay on the loading screen momentarily.
   try {
     user = await request('/api/auth/me');
     await loadPlans();
     showApp();
   } catch (error) {
-    if (token) showAuth(error.message);
+    if (!token) { showAuth(); return; }
+    // 401 = session truly expired → go to login with explanation
+    if (error.message && (
+      error.message.toLowerCase().includes('sign in') ||
+      error.message.toLowerCase().includes('session')
+    )) {
+      token = '';
+      localStorage.removeItem(TOKEN_KEY);
+      clearCache();
+      showAuth('Your session expired. Please sign in again.');
+      return;
+    }
+    // Network/timeout error: show auth screen WITHOUT a confusing error message.
+    // The user's credentials are fine — the server was just sleeping.
+    showAuth();
+    toast('Server is starting up. Please sign in to continue.');
   }
 }
 

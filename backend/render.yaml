@@ -10,3 +10,12 @@ services:
       # Paste your Neon/Supabase Postgres connection string in the Render dashboard.
       - key: DATABASE_URL
         sync: false
+      # Render automatically sets RENDER_EXTERNAL_URL on deployed instances.
+      # The keep-alive thread uses this to self-ping every 10 minutes and prevent
+      # the free-tier instance from spinning down (which causes the cold-start
+      # login error).  No manual action needed - Render injects this automatically.
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          type: web
+          name: levelup-api
+          property: host
